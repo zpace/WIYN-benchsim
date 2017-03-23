@@ -1,14 +1,23 @@
 import numpy as np
 from astropy import units as u, constants as c
 
+
+from solvers import *
+
 class Spectrograph(object):
-    def __init__(self, grating_props, spectrograph_props, slit_props, det_props, telescope_props):
+    def __init__(self, grating_props, spectrograph_props, orientation_props,
+                 slit_props, det_props, telescope_props,
+                 autosolve=True):
         '''
         params:
          - grating_props (dict):
              - sig: groove separation
              - delta: blaze angle
              - rf_tr: reflection or transmission grating?
+         - orientation_props (dict):
+             - alpha: grating normal to incident ray
+             - m: diffraction order
+             - lam_blaze: desired central (blaze) wavelength
          - spectrograph_props (dict)
              - f_coll: collimator focal length
              - f_cam: camera focal length
@@ -22,9 +31,14 @@ class Spectrograph(object):
              - l_scope: telescope focal length
         '''
 
-        for d in [grating_props, spectrograph_props, slit_props, det_props, telescope_props]:
+        for d in [grating_props, spectrograph_props, orientation_props,
+                  slit_props, det_props, telescope_props]:
             for k in d:
                 setattr(self, k, d[k])
+
+        self.lpix_unbinned = self.lpix
+        self.lpix = getattr(self, 'binning', 1) * self.lpix_unbinned
+        self.npix = self.npix / getattr(self, 'binning', 1)
 
         if self.rf_tr == 'rf':
             self.sgn = 1.
@@ -33,17 +47,39 @@ class Spectrograph(object):
         else:
             raise ValueError('Invalid grating type: reflection (rf) or transmission (tr)')
 
-    def set_littrow(self):
-        self.set_angles(self.delta, self.delta)
+        # solve for angle corresponding to central (blaze) wavelength
+        if autosolve:
+            sol = self._solve()
+            self.ang_disp = sol['ang_disp']
+            self.lin_disp = sol['lin_disp']
 
-    def set_angles(self, alpha, beta):
-        setattr(self, 'alpha', alpha)
-        setattr(self, 'beta', beta)
+    def _solve(self):
+        '''
+        wraps around solvers for angular and linear dispersion
+        '''
+        sol = {}
 
-    def set_order(self, m):
-        if type(m) is not int:
-            raise ValueError('order must be integer')
-        setattr(self, 'm', m)
+        # diffraction angle of blaze wavelength
+        sol['beta0'] = self._solve_beta0()
+
+        # angle corresponding to each detector pixel
+        # (requires knowing beta0, lam_ctr, dbeta/dl)
+
+        # use blaze wavelength and its diffraction angle to figure out angular
+        # dispersion (relationship between diffracted angle and wavelength)
+        sol['ang_disp'] = AngularDispersion.from_blaze(
+            alpha=self.alpha, beta0=sol['beta0'], lam_blaze=self.lam_blaze)
+        sol['lin_disp'] = LinearDispersion(
+            ang_disp=sol['ang_disp'], lpix=self.lpix, npix=self.npix, f_cam=self.f_cam)
+
+        return sol
+
+    def _solve_beta0(self):
+        '''
+        use grating equation to solve for diffraction angle of blaze wavelength
+        '''
+        beta0 = np.arcsin(self.m * self.lam_blaze / self.sig - np.sin(self.alpha))
+        return beta0
 
     def lam_range_plot(self, ax):
         lr = self.lam_range
@@ -54,8 +90,56 @@ class Spectrograph(object):
         ax.set_xlim([lr[0].value - 0.6 * ptp, lr[1].value + 0.6 * ptp])
         return ax
 
-    def eff(self, l):
-        pass
+    @property
+    def lam_range(self):
+        '''
+        wavelength limits
+        '''
+        return self.lin_disp.lam_range
+
+    @property
+    def wavelengths(self):
+        '''
+        wavelengths for all detector pixels
+        '''
+        return self.lin_disp.lam_pix_array
+
+    @property
+    def dwavelengths(self):
+        '''
+        wavelength difference subtended by a pixel on detector
+        '''
+        return self.lin_disp.dlam_pix_array
+
+    @property
+    def R(self):
+        '''
+        spectral resolution for all detector pixels (i.e., wavelengths)
+
+        R = lam / w_lam
+        '''
+        lam = self.wavelengths
+        R = (lam / self.w_reim_spec).to('')
+
+        return R.to('')
+
+    @property
+    def R_vel(self):
+        '''
+        Spectral resolution (velocity)
+        '''
+        R_v = (self.R * c.c)
+        return R_v.to(u.km / u.s)
+
+    @property
+    def anam(self):
+        '''
+        anamorphic factor for all detector pixels
+        '''
+        beta = self.lin_disp.p_to_beta(
+            self.lin_disp.pix_array)
+
+        return anamorphic(self.alpha, beta)
 
     @property
     def w0_ang(self):
@@ -65,92 +149,45 @@ class Spectrograph(object):
         return (self.w0_phys / self.l_scope).to(u.rad, equivalencies=u.dimensionless_angles())
 
     @property
-    def fiber_omega(self):
+    def w_reim_spec(self):
+        '''
+        spectral width of the reimaged slit for all detector pixels
+
+        w_lam = 1 / (dbeta / dlam) (1 / r) (f_coll / w0_phys)
+        '''
+        lam = self.wavelengths
+        r = self.anam
+        gamma = self.ang_disp.dbeta_dlam(lam=lam)
+
+        w1 = (r / gamma) * (self.w0_phys / self.f_coll).to(
+            u.rad, equivalencies=u.dimensionless_angles())
+        return w1.to(u.AA)
+
+
+    @property
+    def fiber_grasp(self):
         return (np.pi * (self.w0_ang / 2.)**2.).to(u.arcsec**2)
 
     @property
-    def lam_ctr(self):
-        l = self.sig * (np.sin(self.beta) + self.sgn * np.sin(self.alpha)) / self.m
-        return l.to(u.AA)
-
-    @property
-    def lam_range(self):
-        '''
-        wavelength range
-        '''
-        lam_ctr = self.lam_ctr
-
-        # dx: num pixels available on each side of lam_ctr
-        dx = (self.npix / 2.) * self.lpix
-
-        # kappa: linear dispersion = (dx / dlam)
-        dlam = (dx / self.kappa).to(u.AA)
-        lam_ctr = self.lam_ctr
-        lam_llim = lam_ctr - dlam
-        lam_ulim = lam_ctr + dlam
-
-        return (lam_llim, lam_ulim)
-
-    @property
-    def wavelength(self):
-        ll, lu = self.lam_range
-        return np.arange(ll.value, lu.value, self.dlam_pix.value) * u.AA
-
-    @property
-    def dlam_pix(self):
-        '''
-        wavelength change corresponding to one pixel
-        '''
-        return (self.lpix / self.kappa).to(u.AA)
-
-    @property
-    def anam(self):
-        '''
-        anamorphic factor
-        '''
-        r = np.cos(self.alpha) / np.cos(self.beta)
-        return r
-
-    @property
-    def gamma(self):
-        '''
-        angular dispersion
-        '''
-        gamma = self.m / (self.sig * np.cos(self.beta))
-        return gamma
-
-    @property
-    def kappa(self):
-        '''
-        linear dispersion
-        '''
-        kappa = self.f_cam * self.gamma
-        return kappa
-
-    @property
-    def specres(self):
-        '''
-        spectral resolution at some wavelength(s)
-        '''
-        R = (self.f_coll / self.w0_phys) * (np.sin(self.beta) + self.sgn * np.sin(self.alpha)) / np.cos(self.alpha)
-        return R
-
-    @property
-    def specres_v(self):
-        return (c.c / self.specres).to(u.km / u.s)
-
-    @property
-    def theta(self):
-        '''
-        camera-collimator angle
-        '''
-        return self.alpha - self.beta
-
-    @property
-    def lam_blaze(self):
-        lam_blaze = (2. * self.sig / self.m) * np.sin(self.delta) * np.cos(0.5 * self.theta)
-        return lam_blaze.to(u.AA)
-
-    @property
     def cam_coll_angle(self):
-        return self.alpha - self.sgn * self.beta
+        return self.alpha - self.beta0
+
+
+if __name__ == '__main__':
+    grating_props = {
+        'sig': 1./316 * u.mm, 'delta': 63.4 * u.deg, 'rf_tr': 'rf'}
+    orientation_props = {
+        'alpha': 68.234 * u.deg, 'm': 8, 'lam_blaze': 7000. * u.AA}
+    spectrograph_props = {
+        'f_coll': 776. * u.mm, 'f_cam': 285. * u.mm}
+    slit_props = {
+        'w0_phys': .100 * u.mm}
+    det_props = {
+        'npix': 4000, 'lpix': .012 * u.mm, 'RN': 3.4 * u.electron}
+    telescope_props = {
+        'D_scope': 3500. * u.mm, 'l_scope': 22004 * u.mm, 'A_scope': 9.6 * u.m**2}
+
+    BenchSetup = Spectrograph(
+        grating_props=grating_props, spectrograph_props=spectrograph_props,
+        orientation_props=orientation_props, det_props=det_props,
+        slit_props=slit_props, telescope_props=telescope_props)
