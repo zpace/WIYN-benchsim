@@ -93,8 +93,13 @@ class IFUCubeObserver(object):
 
         spatial_integral = (Fphot_subsample * mask).sum(axis=(1, 2))
 
-        S_cts_obs = spatial_integral * np.prod(np.stack([eff(Lg) for eff in effs]), axis=0) * \
-            dlams * (u.ct / u.ph)
+        effs_a = np.ones_like(Lg)
+        for eff in effs:
+            effs_a *= eff(lams)
+
+        effs_a = effs_a * (u.ct / u.ph)
+
+        S_cts_obs = spatial_integral * dlams * effs_a
         S_cts_obs = S_cts_obs.to(u.ct / u.s)
 
         return S_cts_obs
