@@ -1,7 +1,6 @@
 import numpy as np
 from astropy import units as u, constants as c
 
-
 from solvers import *
 
 class Spectrograph(object):
@@ -20,6 +19,7 @@ class Spectrograph(object):
              - lam_blaze: desired central (blaze) wavelength
          - spectrograph_props (dict)
              - f_coll: collimator focal length
+             - coll_beam_width: width of a single fiber's collimated beam
              - f_cam: camera focal length
          - slit_props (dict)
              - w0_phys: physical slit width
@@ -50,8 +50,10 @@ class Spectrograph(object):
         # solve for angle corresponding to central (blaze) wavelength
         if autosolve:
             sol = self._solve()
+            self.sol = sol
             self.ang_disp = sol['ang_disp']
             self.lin_disp = sol['lin_disp']
+            self.beta0 = sol['beta0']
 
     def _solve(self):
         '''
@@ -60,7 +62,7 @@ class Spectrograph(object):
         sol = {}
 
         # diffraction angle of blaze wavelength
-        sol['beta0'] = self._solve_beta0()
+        sol['beta0'] = self._solve_beta0().to(u.deg)
 
         # angle corresponding to each detector pixel
         # (requires knowing beta0, lam_ctr, dbeta/dl)
@@ -163,7 +165,6 @@ class Spectrograph(object):
             u.rad, equivalencies=u.dimensionless_angles())
         return w1.to(u.AA)
 
-
     @property
     def fiber_grasp(self):
         return (np.pi * (self.w0_ang / 2.)**2.).to(u.arcsec**2)
@@ -171,6 +172,29 @@ class Spectrograph(object):
     @property
     def cam_coll_angle(self):
         return self.alpha - self.beta0
+
+    @property
+    def sig_face(self):
+        '''
+        facet size
+        '''
+        return self.sig * np.cos(self.delta)
+
+    @property
+    def sig_face_eff(self):
+        '''
+        effective (exposed) facet size, due to shadowing
+        '''
+        return self.sig * (np.cos(self.alpha) / np.cos(0.5 * self.cam_coll_angle))
+
+    @property
+    def N_facets(self):
+        '''
+        number of diffractive facets exposed to a given fiber's collimated beam
+        '''
+        N_facets = self.coll_beam_width / (self.sig * np.sin(self.alpha))
+
+        return int(N_facets.value)
 
 
 if __name__ == '__main__':

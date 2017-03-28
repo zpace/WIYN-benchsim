@@ -209,6 +209,8 @@ class LinearDispersion(object):
         dl = lam[1:] - lam[:-1]
         return dl
 
+# testing efficiency calculations
+
 class SpectrographEfficiency(object):
     '''
     Efficiency of a spectrograph is defined as
@@ -230,36 +232,91 @@ class SpectrographEfficiency(object):
                 sigface = sig cos(delta)
     '''
 
-    def __init__(self, sig, delta, alpha, cam_coll_angle):
-        self.sig = sig
-        self.delta = delta
-        self.alpha = alpha
+    def __init__(self, Setup):
+        self.Setup = Setup
 
-        self.sigface = sig * np.cos(delta)
+    def solve_beta(self, lam, m):
+        '''
+        use grating equation to solve for diffraction angle of wavelength
+        '''
+        sinbeta = (m * (lam / self.Setup.sig).decompose() - np.sin(self.Setup.alpha))
+        beta = np.arcsin(sinbeta)
+        #print(sinbeta)
+        return beta
 
-        self.theta = 0.5 * cam_coll_angle
-        self.sigface_prime = self.sig * np.cos(alpha) / np.cos(self.theta)
+    def nu(self, lam, m):
+        '''
+        phase difference between the center and edge of an individual groove
 
-        self.l_at_m = lambda m, beta: ((self.sig / m) * (
-            np.sin(alpha) + np.sin(beta))).to(u.AA)
+              pi sig_face
+        nu = ------------- (sin(alpha) + sin(beta))
+                  lam
 
-    def nu(self, lam, beta):
-        f = (np.pi * self.sigface / lam).to('')
-        return f * (np.sin(self.alpha) + np.sin(beta))
+        '''
+        # first convert order & wavelength to diffracted angle
+        beta = self.solve_beta(lam, m)
 
-    def nu_prime(self):
-        f = (np.pi * self.sig / lam).to('')
-        return f * (np.sin(self.alpha) + np.sin(beta))
+        f = (np.pi * self.Setup.sig_face / lam).to(
+            u.rad, equivalencies=u.dimensionless_angles())
+        nu = f * (np.sin(self.Setup.alpha - self.Setup.delta) + \
+                  np.sin(beta - self.Setup.delta))
+        return nu
 
-    def J(m, beta):
+    def two_nu_prime(self, lam, m):
+        '''
+        phase difference between rays diffracted off centers of adjacent grooves
+        '''
+        # first convert order & wavelength to diffracted angle
+        beta = self.solve_beta(lam, m)
+
+        f = (2. * np.pi * self.Setup.sig / lam) * u.rad
+        two_nu_prime = f * (np.sin(self.Setup.alpha) + np.sin(beta))
+        return two_nu_prime
+
+    def J(self, lam, m):
         '''
         interference function
         '''
+        nu_prime = 0.5 * self.two_nu_prime(lam, m).to(u.rad)
+        N = self.Setup.N_facets
+        J = (np.sin(N * nu_prime) / (N * np.sin(nu_prime)))**2.
 
-        # solve grating equation (with fixed alpha & beta)
-        # for wavelength at a particular order m
+        # but lim(x->0) [sin(N x) / (N sin x)] = 1
+        J[~np.isfinite(J)] = 1.
+        return J
 
-    def B(m, beta):
+    def B(self, lam, m):
         '''
         blaze function
         '''
+        nu = self.nu(lam, m).to(u.rad).value
+        B = (np.sin(nu) / nu)**2.
+        # but lim(x->inf) [sin(N x) / (N sin x)] = 1
+        B[~np.isfinite(B)] = 1.
+        return B
+
+    def I(self, lam, m):
+        '''
+        (non-normalized) intensity function
+        '''
+
+        J, B = self.J(lam, m), self.B(lam, m)
+        #print(J, B)
+
+        return J * B
+
+    def __call__(self, lam, m, dm=10):
+        '''
+        compute efficiency for wavelength lam in order m by comparing to
+            intensities for surrounding dm orders
+        '''
+        lam = np.atleast_2d(lam)
+
+        numer = self.I(lam, m)
+
+        mrange = np.arange(m - dm, m + dm + 1, 1, dtype=int)
+        denom = np.zeros_like(numer)
+        for m_ in mrange:
+            denom += self.I(lam, m_) * (np.abs(self.solve_beta(lam, m)) < 90. * u.deg)
+
+        return (numer / denom).flatten()
