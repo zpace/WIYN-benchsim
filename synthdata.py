@@ -3,6 +3,7 @@ from astropy import constants as c, units as u
 from astropy.io import fits
 
 from scipy.interpolate import RegularGridInterpolator
+from scipy import stats
 
 import os, sys
 if os.environ['MANGA_CONFIG_LOC'] not in sys.path:
@@ -61,7 +62,7 @@ class IFUCubeObserver(object):
 
         return cls(lam=lam_, Fphot=Fphot_, lspax=lspax)
 
-    def __call__(self, ctr, lams, dlams, D_fib, A_scope, effs, spat_samples=(50, 50)):
+    def mean(self, ctr, lams, dlams, D_fib, A_scope, effs, spat_samples=(50, 50)):
         '''
         integrate the interpolated cube over a simulated fiber of diameter `D_fib` (in angular coords)
             centered at `ctr` (`X_ctr`, `Y_ctr`), after sampling the cube in grid specified
@@ -93,16 +94,83 @@ class IFUCubeObserver(object):
 
         spatial_integral = (Fphot_subsample * mask).sum(axis=(1, 2))
 
-        effs_a = np.ones_like(Lg)
-        for eff in effs:
-            effs_a *= eff(lams)
-
-        effs_a = effs_a * (u.ct / u.ph)
+        effs_a = aggregate_effs(effs, lams)
 
         S_cts_obs = spatial_integral * dlams * effs_a
         S_cts_obs = S_cts_obs.to(u.ct / u.s)
 
         return S_cts_obs
 
+    def observe(self, N_obs, t_obs, RN, dark_ct_rate, sky_ct_rate,
+                ctr, lams, dlams, D_fib, A_scope, effs, spat_samples):
+        '''
+        make mock observation(s) of a position in a datacube, assuming poisson statistics
+
+        params:
+         - N_obs: number of observations
+         - t_obs: time observed
+         - RN: mean read noise
+        '''
+        # theoretical mean counts
+        src_ct_rate = self.mean(ctr=ctr, lams=lams, dlams=dlams, D_fib=D_fib,
+                                A_scope=A_scope, effs=effs, spat_samples=spat_samples)
+        tot_ct_rate = src_ct_rate + dark_ct_rate + sky_ct_rate
+        ct_expect = (tot_ct_rate * t_obs).to(u.ct).value
+
+        # poisson distributed read noise
+        RN_dist = stats.poisson(RN)
+
+        # array of poisson distributed mean counts
+        ct_dists = [stats.poisson(s) for s in ct_expect]
+        ct_real = np.column_stack([s.rvs(N_obs) for s in ct_dists])
+
+        return ct_real * u.ct
+
+    def observe_Flam(self, N_obs, t_obs, RN, dark_ct_rate, sky_ct_rate,
+                     ctr, lams, dlams, D_fib, A_scope, effs, spat_samples):
+        '''
+        make mock observation(s) of a position in a datacube, assuming Poisson statistics;
+            subtract dark & sky; and then turn back into a flux-density (with uncertainties)
+        '''
+
+        cts_obsvd = self.observe(N_obs=N_obs, t_obs=t_obs, RN=RN, dark_ct_rate=dark_ct_rate,
+                                 sky_ct_rate=sky_ct_rate, ctr=ctr, lams=lams, dlams=dlams,
+                                 D_fib=D_fib, A_scope=A_scope, effs=effs, spat_samples=spat_samples)
+        cts_obsvd_sum = cts_obsvd.sum(axis=0)
+        cts_unc = unc_of_cts(cts_obsvd_sum)
+
+        # subtract expected mean sky & dark (assuming they're well-sampled)
+        cts_dark_exp = dark_ct_rate * t_obs * N_obs
+        cts_sky_exp = dark_ct_rate * t_obs * N_obs
+
+        cts_src = cts_obsvd_sum - (cts_dark_exp + cts_sky_exp)  #  presumed counts from source
+
+        # CTS to F_lambda
+        # photon energy (multiply)
+        e_ph = (c.h * c.c / lams) / u.ph
+
+        # per-pixel efficiency (divide)
+        effs_a = aggregate_effs(effs, lams)
+
+        # total exposure time (divide)
+        t_tot = N_obs * t_obs
+
+        # go from counts to Flam
+        cts2Flam = (e_ph) / (t_tot * effs_a * dlams * A_scope)
+
+        Flam_src = (cts_src * cts2Flam).to(u.erg / u.s / u.cm**2 / u.AA)
+        Flam_unc = (cts_unc * cts2Flam).to(u.erg / u.s / u.cm**2 / u.AA)
+
+        return Flam_src, Flam_unc
+
+
 def unc_of_cts(cts):
     return np.sqrt(cts.value) * cts.unit
+
+def aggregate_effs(effs, lams):
+    effs_a = np.ones_like(lams.value)
+    for eff in effs:
+        effs_a *= eff(lams)
+
+    effs_a = effs_a * (u.ct / u.ph)
+    return effs_a
