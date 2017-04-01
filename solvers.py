@@ -58,43 +58,46 @@ class AngularDispersion(object):
         res = (np.sin(self.alpha) + np.sin(beta)) / (lam * np.sin(beta))
         return res
 
-    def dbeta_dlam(self, beta=None, lam=None):
-
+    def dbeta_dlam(self, beta=None, lam=None, solved=False):
         # only one of beta and lam can be specified
-        if (((beta is None) and (lam is None)) or
-            ((beta is not None) and (lam is not None))):
-
-            raise ValueError('must specify either beta or lambda, not both')
-
+        if ((beta is not None) and (lam is not None)):
+            if solved:
+                pass
+            else:
+                raise ValueError('specify only one, or override solver!')
+        elif ((beta is None) and (lam is None)):
+            raise ValueError('must specify either beta or lambda')
         elif beta is not None:
             # beta is given, so solve for lam
             lam = self.beta_to_lam(beta)
-
         elif lam is not None:
             # lambda is given, so solve for beta
             beta = self.lam_to_beta(lam)
 
-        res = self._eval_dbeta_dlam(beta, lam)
+        res = self._eval_dbeta_dlam(beta=beta, lam=lam)
         res = res.to(u.deg / u.AA, equivalencies=u.dimensionless_angles())
         return res
 
-    def dlam_dbeta(beta=None, lam=None):
+    def dlam_dbeta(self, beta=None, lam=None, solved=False):
         # only one of beta and lam can be specified
-        if (((beta is None) and (lam is None)) or
-            ((beta is not None) and (lam is not None))):
-
-            raise ValueError('must specify either beta or lambda, not both')
-
+        if ((beta is not None) and (lam is not None)):
+            if solved:
+                pass
+            else:
+                raise ValueError('specify only one, or override solver!')
+        elif ((beta is None) and (lam is None)):
+            raise ValueError('must specify either beta or lambda')
         elif beta is not None:
             # beta is given, so solve for lam
             lam = self.beta_to_lam(beta)
-
+            solved = True
         elif lam is not None:
             # lambda is given, so solve for beta
             beta = self.lam_to_beta(lam)
+            solved = True
 
-        res = 1. / self._eval_dbeta_dlam(beta, lam)
-        res = res.to(u.AA / u.rad, equivalencies=u.dimensionless_angles())
+        res = 1. / self._eval_dbeta_dlam(lam=lam, beta=beta)
+        res = res.to(u.AA / u.deg, equivalencies=u.dimensionless_angles())
         return res
 
 
@@ -244,79 +247,24 @@ class SpectrographEfficiency(object):
         #print(sinbeta)
         return beta
 
-    def nu(self, lam, m):
+    def __call__(self, lam, m):
         '''
-        phase difference between the center and edge of an individual groove
+        compute efficiency for wavelength lam in order m
 
-              pi sig_face
-        nu = ------------- (sin(alpha) + sin(beta))
-                  lam
-
-        '''
-        # first convert order & wavelength to diffracted angle
-        beta = self.solve_beta(lam, m)
-
-        f = (np.pi * self.Setup.sig_face / lam).to(
-            u.rad, equivalencies=u.dimensionless_angles())
-        nu = f * (np.sin(self.Setup.alpha - self.Setup.delta) + \
-                  np.sin(beta - self.Setup.delta))
-        return nu
-
-    def two_nu_prime(self, lam, m):
-        '''
-        phase difference between rays diffracted off centers of adjacent grooves
-        '''
-        # first convert order & wavelength to diffracted angle
-        beta = self.solve_beta(lam, m)
-
-        f = (2. * np.pi * self.Setup.sig / lam) * u.rad
-        two_nu_prime = f * (np.sin(self.Setup.alpha) + np.sin(beta))
-        return two_nu_prime
-
-    def J(self, lam, m):
-        '''
-        interference function
-        '''
-        nu_prime = 0.5 * self.two_nu_prime(lam, m).to(u.rad)
-        N = self.Setup.N_facets
-        J = (np.sin(N * nu_prime) / (N * np.sin(nu_prime)))**2.
-
-        # but lim(x->0) [sin(N x) / (N sin x)] = 1
-        J[~np.isfinite(J)] = 1.
-        return J
-
-    def B(self, lam, m):
-        '''
-        blaze function
-        '''
-        nu = self.nu(lam, m).to(u.rad).value
-        B = (np.sin(nu) / nu)**2.
-        # but lim(x->inf) [sin(N x) / (N sin x)] = 1
-        B[~np.isfinite(B)] = 1.
-        return B
-
-    def I(self, lam, m):
-        '''
-        (non-normalized) intensity function
+                cos(alpha)            k d
+        eff = -------------- sinc^2[ ----- cos(alpha) ( sin(alpha - delta) + sin(beta - delta) ) ]
+                cos(beta)              2
         '''
 
-        J, B = self.J(lam, m), self.B(lam, m)
-        #print(J, B)
+        beta = self.solve_beta(lam=lam, m=m)
 
-        return J * B
-
-    def __call__(self, lam, m, dm=10):
-        '''
-        compute efficiency for wavelength lam in order m by comparing to
-            intensities for surrounding dm orders
-        '''
-        lam = np.atleast_2d(lam)
-
-        numer = self.I(lam, m)
-
-        mrange = np.arange(m - dm, m + dm + 1, 1, dtype=int)
-        denom = np.zeros_like(numer)
-        for m_ in mrange:
-            denom += self.I(lam, m_) * (np.abs(self.solve_beta(lam, m)) < 90. * u.deg)
-
-        return (numer / denom).flatten()
+        k = (2 * np.pi / lam)
+        d = self.Setup.sig
+        delta = self.Setup.delta
+        alpha = self.Setup.alpha
+        # argument of np.sinc is multiplied by pi, so you'll have to divide
+        sinc_arg = (0.5 * k * d).decompose() * np.cos(alpha) * \
+            (np.sin(alpha - delta) + np.sin(beta - delta))
+        sinc_arg = sinc_arg.to(u.rad, equivalencies=u.dimensionless_angles()) / np.pi
+        eff = (np.cos(alpha) / np.cos(beta)) * (np.sinc(sinc_arg))**2.
+        return eff

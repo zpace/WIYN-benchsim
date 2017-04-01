@@ -49,11 +49,7 @@ class Spectrograph(object):
 
         # solve for angle corresponding to central (blaze) wavelength
         if autosolve:
-            sol = self._solve()
-            self.sol = sol
-            self.ang_disp = sol['ang_disp']
-            self.lin_disp = sol['lin_disp']
-            self.beta0 = sol['beta0']
+            self.sol = self._solve()
 
     def _solve(self):
         '''
@@ -82,6 +78,19 @@ class Spectrograph(object):
         '''
         beta0 = np.arcsin(self.m * self.lam_blaze / self.sig - np.sin(self.alpha))
         return beta0
+
+    # relevant properties of wavelength solution
+    @property
+    def ang_disp(self):
+        return self.sol['ang_disp']
+
+    @property
+    def lin_disp(self):
+        return self.sol['lin_disp']
+
+    @property
+    def beta0(self):
+        return self.sol['beta0']
 
     def lam_range_plot(self, ax):
         lr = self.lam_range
@@ -130,7 +139,7 @@ class Spectrograph(object):
         '''
         Spectral resolution (velocity)
         '''
-        R_v = (self.R * c.c)
+        R_v = (c.c / self.R)
         return R_v.to(u.km / u.s)
 
     @property
@@ -146,7 +155,7 @@ class Spectrograph(object):
     @property
     def w0_ang(self):
         '''
-        angular slit width (radians)
+        angular slit width (radians) on the sky
         '''
         return (self.w0_phys / self.l_scope).to(u.rad, equivalencies=u.dimensionless_angles())
 
@@ -155,7 +164,7 @@ class Spectrograph(object):
         '''
         spectral width of the reimaged slit for all detector pixels
 
-        w_lam = 1 / (dbeta / dlam) (1 / r) (f_coll / w0_phys)
+        w_lam = r / (dbeta / dlam) (f_coll / w0_phys)
         '''
         lam = self.wavelengths
         r = self.anam
